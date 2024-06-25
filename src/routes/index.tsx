@@ -3,19 +3,24 @@ import {
   component$,
   useComputed$,
   useSignal,
-  useVisibleTask$,
+  useTask$,
 } from "@builder.io/qwik";
 import { routeLoader$, type DocumentHead } from "@builder.io/qwik-city";
-import EventModal from "~/components/EventModal";
+import EventModal from "~/components/modals/EventModal";
+import Filter from "~/components/Filter";
+import { useFilter } from "~/hooks/useFilter";
 import Avatar from "~/media/user.png?jsx";
 import type { TEvent } from "~/types";
 
+import "swiper/css";
+import "swiper/css/navigation";
+import "swiper/css/pagination";
+import { isServer } from "@builder.io/qwik/build";
+import { EVENTS_ENDPOINT } from "~/constants";
+import { fetchEvents } from "~/utils";
+
 export const useEvents = routeLoader$(async () => {
-  const response = await fetch("https://api.vamoo.la/v1/events");
-
-  const data = await response.json();
-
-  return data.details.results as TEvent[];
+  return fetchEvents(new URL(EVENTS_ENDPOINT));
 });
 
 function viaDate(dateString: string) {
@@ -50,12 +55,20 @@ export default component$(() => {
     events.value.length > 0 ? events.value[0] : null,
   );
 
-  const categories = useComputed$(() => [
-    ...new Set(events.value.flatMap((event) => event.categories)),
-  ]);
+  const {
+    categories,
+    filteredEvents,
+    filterCategories,
+    filterTags,
+    filterMaxDate,
+  } = useFilter(events);
+
+  const hasFilters = useComputed$(
+    () => filterCategories.value.length > 0 || filterTags.value.length > 0,
+  );
 
   const loadEvents = $(async () => {
-    const url = new URL("https://api.vamoo.la/v1/events");
+    const url = new URL(EVENTS_ENDPOINT);
 
     if (events.value.length) {
       const lastEvent = events.value[events.value.length - 1];
@@ -65,78 +78,86 @@ export default component$(() => {
       }
     }
 
-    const response = await fetch(url);
-
-    const data = await response.json();
-
-    return data.details.results as TEvent[];
+    return fetchEvents(url);
   });
 
-  // eslint-disable-next-line qwik/no-use-visible-task
-  useVisibleTask$(({ track, cleanup }) => {
-    track(() => eventsRef.value);
+  useTask$(
+    ({ track, cleanup }) => {
+      if (isServer) return;
+      const el = track(() => eventsRef.value);
 
-    const observeLastChild = () => {
-      if (!eventsRef.value) return;
+      const _hasFilters = track(() => hasFilters.value);
 
-      const lastChild = eventsRef.value.lastElementChild;
+      const observeLastChild = () => {
+        if (!el || _hasFilters) return;
 
-      if (lastChild) {
-        observer.observe(lastChild);
-      }
-    };
+        const lastChild = el.lastElementChild;
 
-    const observer = new IntersectionObserver((entries, observer) => {
-      entries.forEach(async (entry) => {
-        if (entry.isIntersecting) {
-          try {
-            isLoading.value = true;
-            const newEvents = await loadEvents();
-
-            if (!newEvents.length) {
-              isLoading.value = false;
-
-              return;
-            }
-
-            events.value = [...events.value, ...newEvents];
-
-            observer.unobserve(entry.target);
-            observeLastChild();
-          } catch (err) {
-            console.log(err);
-          } finally {
-            isLoading.value = false;
-          }
+        if (lastChild) {
+          observer.observe(lastChild);
         }
-      });
-    });
+      };
 
-    observeLastChild();
-    cleanup(() => {
-      observer.disconnect();
-    });
-  });
+      const observer = new IntersectionObserver((entries, observer) => {
+        entries.forEach(async (entry) => {
+          if (entry.isIntersecting) {
+            try {
+              isLoading.value = true;
+              const newEvents = await loadEvents();
+
+              if (!newEvents.length) {
+                isLoading.value = false;
+
+                return;
+              }
+
+              events.value = [...events.value, ...newEvents];
+
+              observer.unobserve(entry.target);
+              observeLastChild();
+            } catch (err) {
+              console.log(err);
+            } finally {
+              isLoading.value = false;
+            }
+          }
+        });
+      });
+
+      observeLastChild();
+      cleanup(() => {
+        observer.disconnect();
+      });
+    },
+    { eagerness: "visible" },
+  );
 
   return (
-    <div class="mx-auto grid grid-cols-1 gap-10 overflow-hidden md:h-screen md:grid-cols-[16%,1fr,16%] lg:px-5 xl:max-w-[1340px] 2xl:px-0">
-      <aside class="">
+    <div class="mx-auto grid grid-cols-1 gap-10 overflow-hidden md:h-screen lg:grid-cols-[16%,1fr,16%] lg:px-5 xl:max-w-[1340px] 2xl:px-0">
+      <aside class="hidden lg:block">
         <p class="text-2xl font-bold">Categorias</p>
         {categories.value.map((category, index) => (
           <p key={index}>{category}</p>
         ))}
       </aside>
-      <main class="md:h-full md:overflow-hidden">
-        <div class="rounded-2xl  px-2 py-5"></div>
+      <main class="md:h-full md:overflow-hidden lg:pt-2">
+        <Filter
+          categories={categories}
+          filterTags={filterTags}
+          filterCategories={filterCategories}
+          filterMaxDate={filterMaxDate}
+        />
 
         <div class="pb-20 [scrollbar-width:none] md:h-full md:overflow-y-auto md:px-3">
           <p class="mb-5 text-xl">
-            <strong class="text-[#ff7400]">{events.value.length}</strong>{" "}
+            <strong class="text-[#ff7400]">
+              {filteredEvents.value.length}
+            </strong>{" "}
             Eventos encontrados
           </p>
 
           <div ref={eventsRef} class="space-y-10 ">
-            {events.value.map((event, index) => (
+            {filteredEvents.value.map((event, index) => (
               <div
                 key={`${event.id}-${index}`}
                 class="rounded-2xl border shadow-lg"
@@ -177,14 +198,23 @@ export default component$(() => {
                 </div>
                 <div class="space-y-5 p-5">
                   <div class="flex flex-wrap gap-2">
-                    {event.categories.map((category) => (
-                      <span
-                        key={category}
-                        class="rounded-full border bg-black px-2.5 py-1 text-sm font-semibold text-white"
-                      >
-                        {category}
-                      </span>
-                    ))}
+                    {event.categories.map((category) => {
+                      const isInFilter =
+                        filterCategories.value.includes(category);
+
+                      return (
+                        <span
+                          key={category}
+                          class={[
+                            "rounded-full border bg-black  px-2.5 py-1 text-sm font-semibold text-white",
+                            hasFilters.value &&
+                              (isInFilter ? "opacity-100" : "opacity-50"),
+                          ]}
+                        >
+                          {category}
+                        </span>
+                      );
+                    })}
 
                     {event.tags.map((tag) => (
                       <span
@@ -250,11 +280,11 @@ export default component$(() => {
             </div>
           )}
         </div>
-        {/* modal */}
+
         {previewEvent.value && (
           <EventModal
-            show={showModal}
-            onCloseModal$={() => {
+            open={showModal}
+            onClose$={() => {
               showModal.value = false;
             }}
             event={previewEvent.value}
