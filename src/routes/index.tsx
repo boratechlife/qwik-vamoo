@@ -1,21 +1,33 @@
 import {
-  $,
   component$,
   useComputed$,
   useSignal,
+  useTask$,
   useVisibleTask$,
 } from "@builder.io/qwik";
 import { routeLoader$, type DocumentHead } from "@builder.io/qwik-city";
-import EventModal from "~/components/EventModal";
+import EventModal from "~/components/modals/EventModal";
+import Filter from "~/components/Filter";
+import { useFilter } from "~/hooks/useFilter";
 import Avatar from "~/media/user.png?jsx";
-import type { TEvent } from "~/types";
+
+import "swiper/css";
+import "swiper/css/navigation";
+import "swiper/css/pagination";
+
+import { EVENTS_ENDPOINT, categories } from "~/constants";
+import { fetchEvents } from "~/utils";
+import { useEventsContext } from "~/context/events-context";
+import { useGeolocation } from "~/hooks/useGeolocation";
 
 export const useEvents = routeLoader$(async () => {
-  const response = await fetch("https://api.vamoo.la/v1/events");
+  const url = new URL(EVENTS_ENDPOINT);
 
-  const data = await response.json();
+  url.searchParams.set("toDate", new Date().toISOString());
+  url.searchParams.set("geoLocation", "0,0");
+  url.searchParams.set("distance", "1km");
 
-  return data.details.results as TEvent[];
+  return fetchEvents(url);
 });
 
 function viaDate(dateString: string) {
@@ -25,18 +37,29 @@ function viaDate(dateString: string) {
     return "";
   }
 
-  return `${date.getDate()} - ${new Intl.DateTimeFormat(undefined, {
+  const weekday = new Intl.DateTimeFormat("pt-PT", { weekday: "short" })
+    .format(date)
+    .slice(0, 3);
+
+  const time = new Intl.DateTimeFormat("pt-PT", {
     hour: "numeric",
     minute: "numeric",
     hour12: false,
     timeZone: "UTC",
   })
     .format(date)
-    .toLowerCase()}`;
+    .toLowerCase();
+
+  return `${weekday}, ${date.getDate()} - ${time}`;
 }
 
 export default component$(() => {
-  const eventsRef = useSignal<HTMLDivElement>();
+  const evCtx = useEventsContext();
+
+  useGeolocation();
+  const { loadEvents } = useFilter();
+
+  const triggerRef = useSignal<HTMLDivElement>();
 
   const showModal = useSignal(false);
 
@@ -44,49 +67,26 @@ export default component$(() => {
 
   const isLoading = useSignal(false);
 
-  const events = useSignal<TEvent[]>(initialEvents.value);
-
   const previewEvent = useSignal(
-    events.value.length > 0 ? events.value[0] : null,
+    evCtx.events.length > 0 ? evCtx.events[0] : null,
   );
 
-  const categories = useComputed$(() => [
-    ...new Set(events.value.flatMap((event) => event.categories)),
-  ]);
+  const hasFilters = useComputed$(
+    () => evCtx.filterCategories.length > 0 || evCtx.filterTags.length > 0,
+  );
 
-  const loadEvents = $(async () => {
-    const url = new URL("https://api.vamoo.la/v1/events");
-
-    if (events.value.length) {
-      const lastEvent = events.value[events.value.length - 1];
-
-      for (const value of lastEvent._esMeta.sort) {
-        url.searchParams.append("search_after[]", value.toString());
-      }
-    }
-
-    const response = await fetch(url);
-
-    const data = await response.json();
-
-    return data.details.results as TEvent[];
+  useTask$(() => {
+    evCtx.events = initialEvents.value;
+    previewEvent.value = initialEvents.value[0];
   });
 
   // eslint-disable-next-line qwik/no-use-visible-task
-  useVisibleTask$(({ track, cleanup }) => {
-    track(() => eventsRef.value);
+  useVisibleTask$(async ({ track, cleanup }) => {
+    const el = track(() => triggerRef.value);
 
-    const observeLastChild = () => {
-      if (!eventsRef.value) return;
+    if (!el) return;
 
-      const lastChild = eventsRef.value.lastElementChild;
-
-      if (lastChild) {
-        observer.observe(lastChild);
-      }
-    };
-
-    const observer = new IntersectionObserver((entries, observer) => {
+    const observer = new IntersectionObserver((entries) => {
       entries.forEach(async (entry) => {
         if (entry.isIntersecting) {
           try {
@@ -99,10 +99,7 @@ export default component$(() => {
               return;
             }
 
-            events.value = [...events.value, ...newEvents];
-
-            observer.unobserve(entry.target);
-            observeLastChild();
+            evCtx.events = [...evCtx.events, ...newEvents];
           } catch (err) {
             console.log(err);
           } finally {
@@ -112,31 +109,32 @@ export default component$(() => {
       });
     });
 
-    observeLastChild();
-    cleanup(() => {
-      observer.disconnect();
-    });
+    observer.observe(el);
+
+    cleanup(() => observer.disconnect());
   });
 
   return (
-    <div class="mx-auto grid grid-cols-1 gap-10 overflow-hidden md:h-screen md:grid-cols-[16%,1fr,16%] lg:px-5 xl:max-w-[1340px] 2xl:px-0">
-      <aside class="">
+    <div class="mx-auto grid grid-cols-1 gap-10 overflow-hidden md:h-screen lg:grid-cols-[16%,1fr,16%] lg:px-5 xl:max-w-[1340px] 2xl:px-0">
+      <aside class="hidden lg:block">
         <p class="text-2xl font-bold">Categorias</p>
-        {categories.value.map((category, index) => (
-          <p key={index}>{category}</p>
+        {categories.map((category, index) => (
+          <p key={index} class="font-semibold capitalize text-[#2d2d2d]">
+            {category}
+          </p>
         ))}
       </aside>
-      <main class="md:h-full md:overflow-hidden">
-        <div class="rounded-2xl  px-2 py-5"></div>
+      <main class="md:h-full md:overflow-hidden lg:pt-2">
+        <Filter />
 
         <div class="pb-20 [scrollbar-width:none] md:h-full md:overflow-y-auto md:px-3">
           <p class="mb-5 text-xl">
-            <strong class="text-[#ff7400]">{events.value.length}</strong>{" "}
+            <strong class="text-[#ff7400]">{evCtx.events.length}</strong>{" "}
             Eventos encontrados
           </p>
 
-          <div ref={eventsRef} class="space-y-10 ">
-            {events.value.map((event, index) => (
+          <div class="space-y-10 ">
+            {evCtx.events.map((event, index) => (
               <div
                 key={`${event.id}-${index}`}
                 class="rounded-2xl border shadow-lg"
@@ -159,8 +157,8 @@ export default component$(() => {
                 </div>
                 <div class="relative rounded-2xl bg-black">
                   <div class="absolute left-5 top-5 flex items-center gap-3">
-                    <span class="rounded-full bg-[#0c9d0c] px-2.5 py-1 text-sm font-semibold text-white">
-                      Qua, {viaDate(event.startsOn)}
+                    <span class="rounded-full bg-[#0c9d0c] px-2.5 py-1 text-sm font-semibold capitalize text-white">
+                      {viaDate(event.startsOn)}
                     </span>
                     <span class="rounded-full bg-[#ff7400] px-2.5 py-1 text-sm font-semibold text-white">
                       {event.placeName}
@@ -177,14 +175,23 @@ export default component$(() => {
                 </div>
                 <div class="space-y-5 p-5">
                   <div class="flex flex-wrap gap-2">
-                    {event.categories.map((category) => (
-                      <span
-                        key={category}
-                        class="rounded-full border bg-black px-2.5 py-1 text-sm font-semibold text-white"
-                      >
-                        {category}
-                      </span>
-                    ))}
+                    {event.categories.map((category) => {
+                      const isInFilter =
+                        evCtx.filterCategories.includes(category);
+
+                      return (
+                        <span
+                          key={category}
+                          class={[
+                            "rounded-full border bg-black  px-2.5 py-1 text-sm font-semibold text-white",
+                            hasFilters.value &&
+                              (isInFilter ? "opacity-100" : "opacity-50"),
+                          ]}
+                        >
+                          {category}
+                        </span>
+                      );
+                    })}
 
                     {event.tags.map((tag) => (
                       <span
@@ -243,18 +250,21 @@ export default component$(() => {
                 </div>
               </div>
             ))}
-          </div>
-          {isLoading.value && (
-            <div class="flex items-center justify-center pb-20 pt-10">
-              <div class="h-16 w-16 animate-[spin_2s_linear_infinite] rounded-full border-4 border-dashed border-gray-300"></div>
+
+            <div ref={triggerRef}>
+              {isLoading.value && (
+                <div class="flex items-center justify-center pb-20 pt-10">
+                  <div class="h-16 w-16 animate-[spin_2s_linear_infinite] rounded-full border-4 border-dashed border-gray-300"></div>
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
-        {/* modal */}
+
         {previewEvent.value && (
           <EventModal
-            show={showModal}
-            onCloseModal$={() => {
+            open={showModal}
+            onClose$={() => {
               showModal.value = false;
             }}
             event={previewEvent.value}
